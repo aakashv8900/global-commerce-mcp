@@ -343,6 +343,125 @@ async def subscribe_alert(request: SubscribeAlertRequest):
         }
 
 
+class TriggerScrapeRequest(BaseModel):
+    platform: str = "amazon_us"
+    category: Optional[str] = None
+    limit: int = 10
+
+
+@app.post("/api/trigger-scrape")
+async def trigger_scrape(request: TriggerScrapeRequest):
+    """Manually trigger a scraping job for a specific platform/category."""
+    from src.scrapers import AmazonScraper, FlipkartScraper
+    from src.jobs.scheduler import AMAZON_CATEGORIES, FLIPKART_CATEGORIES
+    
+    results = {"products_found": 0, "products_added": 0, "errors": []}
+    
+    try:
+        if request.platform == "amazon_us":
+            categories = [request.category] if request.category else AMAZON_CATEGORIES[:2]
+            async with AmazonScraper() as scraper:
+                for category in categories:
+                    try:
+                        urls = await scraper.scrape_bestseller_page(category)
+                        results["products_found"] += len(urls)
+                        
+                        async with async_session_maker() as session:
+                            product_repo = ProductRepository(session)
+                            
+                            for url in urls[:request.limit]:
+                                asin = url.split("/dp/")[-1].split("/")[0]
+                                existing = await product_repo.get_by_asin(asin, "amazon_us")
+                                if existing:
+                                    continue
+                                
+                                product_data = await scraper.scrape_product(url)
+                                if product_data:
+                                    await product_repo.create(
+                                        platform="amazon_us",
+                                        asin=product_data.asin,
+                                        url=url,
+                                        title=product_data.title,
+                                        category=product_data.category,
+                                        brand=product_data.brand,
+                                        image_url=product_data.image_url,
+                                    )
+                                    await session.commit()
+                                    results["products_added"] += 1
+                    except Exception as e:
+                        results["errors"].append(f"{category}: {str(e)}")
+        
+        elif request.platform == "flipkart_in":
+            categories = [request.category] if request.category else FLIPKART_CATEGORIES[:2]
+            async with FlipkartScraper() as scraper:
+                for category in categories:
+                    try:
+                        urls = await scraper.scrape_bestseller_page(category)
+                        results["products_found"] += len(urls)
+                        
+                        async with async_session_maker() as session:
+                            product_repo = ProductRepository(session)
+                            
+                            for url in urls[:request.limit]:
+                                fsn = scraper._extract_fsn(url)
+                                if not fsn:
+                                    continue
+                                existing = await product_repo.get_by_asin(fsn, "flipkart_in")
+                                if existing:
+                                    continue
+                                
+                                product_data = await scraper.scrape_product(url)
+                                if product_data:
+                                    await product_repo.create(
+                                        platform="flipkart_in",
+                                        asin=product_data.asin,
+                                        url=url,
+                                        title=product_data.title,
+                                        category=product_data.category,
+                                        brand=product_data.brand,
+                                        image_url=product_data.image_url,
+                                    )
+                                    await session.commit()
+                                    results["products_added"] += 1
+                    except Exception as e:
+                        results["errors"].append(f"{category}: {str(e)}")
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported platform: {request.platform}")
+        
+        return {
+            "status": "completed",
+            "platform": request.platform,
+            "results": results,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/scraper-status")
+async def scraper_status():
+    """Get current scraper status and statistics."""
+    async with async_session_maker() as session:
+        product_repo = ProductRepository(session)
+        
+        # Count products by platform
+        amazon_count = len(await product_repo.get_by_category("Electronics", "amazon_us", limit=1000))
+        flipkart_count = len(await product_repo.get_by_category("Electronics", "flipkart_in", limit=1000))
+        
+        return {
+            "scrapers": {
+                "amazon_us": {"enabled": True, "products": amazon_count},
+                "flipkart_in": {"enabled": True, "products": flipkart_count},
+            },
+            "scheduler": {
+                "amazon_bestsellers": "Weekly (Sunday 2 AM)",
+                "amazon_metrics": "Daily (3 AM)",
+                "flipkart_bestsellers": "Weekly (Monday 2 AM)",
+                "flipkart_metrics": "Daily (4 AM)",
+            }
+        }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
