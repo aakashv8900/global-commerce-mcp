@@ -1,7 +1,8 @@
-"""Proxy manager for scraper anti-blocking."""
+"""Proxy manager with ScraperAPI direct rendering support."""
 
 import random
 import asyncio
+import aiohttp
 from dataclasses import dataclass
 from typing import Optional
 from datetime import datetime, timedelta
@@ -25,34 +26,57 @@ class ProxyConfig:
         return f"{self.protocol}://{self.host}:{self.port}"
 
 
+class ScraperAPIClient:
+    """Client for ScraperAPI direct rendering (more reliable than proxy mode)."""
+    
+    BASE_URL = "https://api.scraperapi.com"
+    
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+    
+    async def fetch_html(self, url: str, render_js: bool = True) -> Optional[str]:
+        """Fetch page HTML using ScraperAPI."""
+        params = {
+            "api_key": self.api_key,
+            "url": url,
+            "render": str(render_js).lower(),
+            "country_code": "us",
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    self.BASE_URL,
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=60)
+                ) as response:
+                    if response.status == 200:
+                        return await response.text()
+                    else:
+                        print(f"ScraperAPI error {response.status}: {await response.text()}")
+                        return None
+        except Exception as e:
+            print(f"ScraperAPI request failed: {e}")
+            return None
+
+
 class ProxyManager:
     """Manages proxy rotation for scrapers."""
-    
-    # Free proxy list (rotate these)
-    FREE_PROXIES = [
-        # These are examples - in production, fetch from proxy APIs
-        {"host": "proxy1.example.com", "port": 8080},
-        {"host": "proxy2.example.com", "port": 8080},
-    ]
     
     def __init__(self):
         self.proxies: list[ProxyConfig] = []
         self.failed_proxies: dict[str, datetime] = {}
         self.current_index = 0
+        self.scraper_api_client: Optional[ScraperAPIClient] = None
         self._load_proxies()
     
     def _load_proxies(self):
         """Load proxies from config or environment."""
-        # Check for ScraperAPI key
+        # Check for ScraperAPI key - use direct API mode
         scraper_api_key = getattr(settings, 'scraper_api_key', None)
         if scraper_api_key:
-            # ScraperAPI proxy format
-            self.proxies.append(ProxyConfig(
-                host="proxy-server.scraperapi.com",
-                port=8001,
-                username="scraperapi",
-                password=scraper_api_key,
-            ))
+            self.scraper_api_client = ScraperAPIClient(scraper_api_key)
+            print(f"ScraperAPI configured in direct mode")
         
         # Check for Bright Data credentials
         bright_data_user = getattr(settings, 'bright_data_user', None)
@@ -64,10 +88,16 @@ class ProxyManager:
                 username=bright_data_user,
                 password=bright_data_pass,
             ))
-        
-        # If no paid proxies, use direct connection with stealth
-        if not self.proxies:
-            self.proxies = []  # Empty = direct connection
+    
+    def has_scraper_api(self) -> bool:
+        """Check if ScraperAPI is configured."""
+        return self.scraper_api_client is not None
+    
+    async def fetch_with_scraper_api(self, url: str) -> Optional[str]:
+        """Fetch page using ScraperAPI direct rendering."""
+        if self.scraper_api_client:
+            return await self.scraper_api_client.fetch_html(url)
+        return None
     
     def get_proxy(self) -> Optional[ProxyConfig]:
         """Get next available proxy with rotation."""
@@ -162,4 +192,4 @@ class CircuitBreaker:
 # Global instances
 proxy_manager = ProxyManager()
 rate_limiter = RateLimiter(requests_per_minute=30)
-circuit_breaker = CircuitBreaker(failure_threshold=5, reset_timeout=120)
+circuit_breaker = CircuitBreaker(failure_threshold=10, reset_timeout=300)

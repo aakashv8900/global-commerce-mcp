@@ -213,6 +213,16 @@ class BaseScraper(ABC):
         
         for attempt in range(self.MAX_RETRIES):
             try:
+                # Try ScraperAPI direct mode first (more reliable)
+                if proxy_manager.has_scraper_api():
+                    html = await proxy_manager.fetch_with_scraper_api(url)
+                    if html:
+                        result = await self.parse_product_html(url, html)
+                        if result:
+                            circuit_breaker.record_success(self.PLATFORM)
+                            return result
+                
+                # Fallback to Playwright
                 result = await self.scrape_product(url)
                 if result:
                     circuit_breaker.record_success(self.PLATFORM)
@@ -229,6 +239,11 @@ class BaseScraper(ABC):
                     wait_time = (2 ** attempt) + random.uniform(0, 1)
                     await asyncio.sleep(wait_time)
         
+        return None
+
+    async def parse_product_html(self, url: str, html: str) -> ScrapedProduct | None:
+        """Parse product from raw HTML. Override in subclasses for direct API mode."""
+        # Default implementation - subclasses should override for efficiency
         return None
 
     @abstractmethod
