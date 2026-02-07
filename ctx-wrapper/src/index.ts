@@ -297,9 +297,37 @@ async function start() {
     // 1️⃣ Connect MCP to Streamable HTTP transport
     await mcpServer.connect(streamableTransport);
 
-    // 2️⃣ Mount StreamableHTTP endpoint
-    app.all("/mcp", async (req, res) => {
-      await streamableTransport.handleRequest(req, res);
+    // 2️⃣ Mount /mcp endpoint with auto-transport detection
+    // Handles both SSE (for Inspector) and StreamableHTTP (for production)
+    app.all("/mcp", async (req: Request, res: Response) => {
+      const acceptHeader = req.headers.accept || "";
+      const isSSERequest = req.method === "GET" && acceptHeader.includes("text/event-stream");
+
+      if (isSSERequest) {
+        // SSE transport for MCP Inspector
+        console.log("SSE connection on /mcp (Inspector mode)");
+        const sessionId = crypto.randomUUID();
+        const sseTransport = new SSEServerTransport("/messages", res);
+        sseTransports.set(sessionId, sseTransport);
+
+        const sseServer = createSSEServer();
+
+        res.on("close", () => {
+          console.log(`SSE session ${sessionId} closed`);
+          sseTransports.delete(sessionId);
+        });
+
+        try {
+          await sseServer.connect(sseTransport);
+          console.log(`SSE session ${sessionId} connected`);
+        } catch (error) {
+          console.error("SSE connection error:", error);
+          sseTransports.delete(sessionId);
+        }
+      } else {
+        // StreamableHTTP for production clients
+        await streamableTransport.handleRequest(req, res);
+      }
     });
 
     // 3️⃣ SSE endpoint - GET /sse for SSE connections (Inspector compatible)
