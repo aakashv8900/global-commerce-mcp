@@ -315,3 +315,58 @@ class IntelligenceEngine:
         # Sort by trend score descending
         scored.sort(key=lambda x: x.trend_score, reverse=True)
         return scored[:limit]
+
+    def calculate_trend_score(self, metrics: list[DailyMetric]) -> float:
+        """Calculate a simple trend score from metrics."""
+        if not metrics:
+            return 0.0
+        trend = self.trend_calc.calculate(metrics)
+        return trend.score
+
+    def get_demand_signals(self, metrics: list[DailyMetric]) -> dict:
+        """Get demand signals from metrics."""
+        if not metrics:
+            return {
+                "reviewVelocity": 0,
+                "rankImprovement": 0,
+                "priceStability": "stable",
+            }
+        demand = self.demand_calc.calculate(metrics)
+        return {
+            "reviewVelocity": demand.signals.review_velocity,
+            "rankImprovement": demand.signals.rank_improvement,
+            "priceStability": "stable" if demand.signals.price_volatility < 0.1 else "volatile",
+        }
+
+    def generate_category_insights(self, trending: list[dict]) -> list[str]:
+        """Generate insights for a category based on trending products."""
+        if not trending:
+            return ["No trending products found in this category"]
+        
+        insights = []
+        
+        # Top performer insight
+        if trending:
+            top = trending[0]
+            insights.append(f"Top trending: {top.get('title', 'Unknown')[:50]}... with trend score {top.get('trendScore', 0):.1f}")
+        
+        # Category momentum
+        avg_trend = sum(p.get("trendScore", 0) for p in trending) / len(trending) if trending else 0
+        if avg_trend > 50:
+            insights.append("Category shows strong upward momentum")
+        elif avg_trend > 0:
+            insights.append("Category showing moderate growth")
+        else:
+            insights.append("Category trending downward - consider timing")
+        
+        # Price range insight
+        prices = [p.get("price", 0) for p in trending if p.get("price", 0) > 0]
+        if prices:
+            insights.append(f"Price range: ${min(prices):.2f} - ${max(prices):.2f}")
+        
+        # Review velocity insight
+        high_velocity = [p for p in trending if p.get("demandSignals", {}).get("reviewVelocity", 0) > 5]
+        if high_velocity:
+            insights.append(f"{len(high_velocity)} products with high review velocity")
+        
+        return insights[:5]
