@@ -363,15 +363,20 @@ async function start() {
     // 4️⃣ SSE message endpoint - POST /messages for SSE messages
     app.post("/messages", async (req: Request, res: Response) => {
       const sessionId = req.query.sessionId as string;
+      console.log(`POST /messages received for session: ${sessionId}`);
+
       const transport = sseTransports.get(sessionId);
 
       if (!transport) {
+        console.error(`Session not found: ${sessionId}`);
+        console.log(`Active sessions: ${Array.from(sseTransports.keys()).join(", ")}`);
         res.status(400).json({ error: "Invalid or expired session" });
         return;
       }
 
       try {
-        await transport.handlePostMessage(req, res);
+        // CRITICAL: Pass req.body explicitly to avoid "stream is not readable" error
+        await transport.handlePostMessage(req, res, req.body);
       } catch (error) {
         console.error("SSE message error:", error);
         res.status(500).json({ error: "Failed to handle message" });
