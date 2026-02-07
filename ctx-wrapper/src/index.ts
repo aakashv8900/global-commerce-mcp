@@ -1,210 +1,370 @@
 /**
- * CommerceSignal MCP Server for CTX Protocol
- *
- * Express + MCP SDK + CTX middleware for marketplace monetization.
+ * CommerceSignal MCP Server (Streamable HTTP + SSE)
+ * Production-ready for CTX Protocol + Inspector
  */
 
 import express, { Request, Response, NextFunction } from "express";
+import crypto from "crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import {
-    ListToolsRequestSchema,
-    CallToolRequestSchema,
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { TOOLS } from "./tools/index.js";
 import { getBackendClient } from "./backend/client.js";
 
-// Dynamic import for CTX SDK (handles if not available)
+// Optional CTX SDK (for monetization)
 let createContextMiddleware: any = null;
 try {
-    const ctxSdk = await import("@ctxprotocol/sdk");
-    createContextMiddleware = ctxSdk.createContextMiddleware;
-} catch (e) {
-    console.log("CTX SDK not available, running without payment verification");
+  const ctxSdk = await import("@ctxprotocol/sdk");
+  createContextMiddleware = ctxSdk.createContextMiddleware;
+} catch {
+  console.log("CTX SDK not installed — running without monetization middleware");
 }
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT: number = process.env.PORT
+  ? parseInt(process.env.PORT, 10)
+  : 3000;
 
 app.use(express.json());
 
-// CTX Protocol middleware - handles payment verification & request signing
+/**
+ * Enable CTX middleware if explicitly enabled
+ */
 if (process.env.CTX_ENABLED === "true" && createContextMiddleware) {
-    app.use("/mcp", createContextMiddleware());
-    console.log("✓ CTX Protocol middleware enabled");
+  app.use("/mcp", createContextMiddleware());
+  console.log("✓ CTX middleware enabled");
 } else {
-    console.log("ℹ CTX middleware disabled (set CTX_ENABLED=true to enable)");
+  console.log("ℹ CTX middleware disabled");
 }
 
-// Health check endpoint
+/**
+ * Health Check
+ */
 app.get("/health", (_req: Request, res: Response) => {
-    res.json({ status: "ok", service: "commerce-signal-mcp", version: "1.0.0" });
+  res.json({
+    status: "ok",
+    service: "commerce-signal-mcp",
+    version: "1.0.0",
+  });
 });
 
-// Simple test endpoint - lists all tools (no SSE required)
+/**
+ * Simple test endpoint
+ */
 app.get("/test/tools", (_req: Request, res: Response) => {
-    res.json({
-        success: true,
-        toolCount: TOOLS.length,
-        tools: TOOLS.map(t => ({ name: t.name, description: t.description }))
-    });
+  res.json({
+    success: true,
+    toolCount: TOOLS.length,
+    tools: TOOLS.map((t) => ({
+      name: t.name,
+      description: t.description,
+    })),
+  });
 });
 
-// Create MCP server instance
+/**
+ * Create MCP Server
+ */
 const mcpServer = new Server(
-    {
-        name: "commerce-signal",
-        version: "1.0.0",
+  {
+    name: "commerce-signal",
+    version: "1.0.0",
+  },
+  {
+    capabilities: {
+      tools: {},
     },
-    {
-        capabilities: {
-            tools: {},
-        },
-    }
+  }
 );
 
-// Handle list_tools request
+/**
+ * list_tools handler
+ */
 mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
-    return {
-        tools: TOOLS,
-    };
+  return { tools: TOOLS };
 });
 
-// Handle call_tool request
+/**
+ * call_tool handler
+ */
 mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params;
+  const backend = getBackendClient();
+
+  try {
+    let result: any;
+
+    switch (name) {
+      case "analyze_product":
+        result = await backend.analyzeProduct(args?.url as string);
+        break;
+
+      case "compare_global_prices":
+        result = await backend.compareGlobalPrices(
+          args?.url as string,
+          args?.includeRegions as string[]
+        );
+        break;
+
+      case "detect_trending_products":
+        result = await backend.detectTrending(
+          args?.category as string,
+          (args?.platform as string) || "amazon_us",
+          (args?.limit as number) || 10
+        );
+        break;
+
+      case "analyze_seller":
+        result = await backend.analyzeSeller(
+          args?.sellerId as string,
+          (args?.platform as string) || "amazon_us"
+        );
+        break;
+
+      case "analyze_brand":
+        result = await backend.analyzeBrand(
+          args?.brandName as string,
+          (args?.platform as string) || "amazon_us",
+          args?.category as string
+        );
+        break;
+
+      case "forecast_demand":
+        result = await backend.forecastDemand(
+          args?.productUrl as string,
+          (args?.horizonDays as number) || 7
+        );
+        break;
+
+      case "subscribe_alert":
+        result = await backend.subscribeAlert(
+          args?.productUrl as string,
+          args?.alertType as string,
+          args?.thresholdPercent as number
+        );
+        break;
+
+      default:
+        throw new Error(`Unknown tool: ${name}`);
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(result, null, 2),
+        },
+      ],
+      structuredContent: result, // required for CTX monetization
+    };
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unknown error";
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Error: ${message}`,
+        },
+      ],
+      isError: true,
+    };
+  }
+});
+
+/**
+ * Create Streamable HTTP Transport
+ */
+const streamableTransport = new StreamableHTTPServerTransport({
+  sessionIdGenerator: () => crypto.randomUUID(),
+});
+
+/**
+ * SSE Transport - Map of session ID to transport
+ */
+const sseTransports = new Map<string, SSEServerTransport>();
+
+/**
+ * Create a new MCP Server for SSE (separate from streamable)
+ */
+function createSSEServer(): Server {
+  const server = new Server(
+    {
+      name: "commerce-signal",
+      version: "1.0.0",
+    },
+    {
+      capabilities: {
+        tools: {},
+      },
+    }
+  );
+
+  // Register same handlers
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    return { tools: TOOLS };
+  });
+
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     const backend = getBackendClient();
 
     try {
-        let result: object;
+      let result: any;
 
-        switch (name) {
-            case "analyze_product":
-                result = await backend.analyzeProduct(args?.url as string);
-                break;
+      switch (name) {
+        case "analyze_product":
+          result = await backend.analyzeProduct(args?.url as string);
+          break;
+        case "compare_global_prices":
+          result = await backend.compareGlobalPrices(
+            args?.url as string,
+            args?.includeRegions as string[]
+          );
+          break;
+        case "detect_trending_products":
+          result = await backend.detectTrending(
+            args?.category as string,
+            (args?.platform as string) || "amazon_us",
+            (args?.limit as number) || 10
+          );
+          break;
+        case "analyze_seller":
+          result = await backend.analyzeSeller(
+            args?.sellerId as string,
+            (args?.platform as string) || "amazon_us"
+          );
+          break;
+        case "analyze_brand":
+          result = await backend.analyzeBrand(
+            args?.brandName as string,
+            (args?.platform as string) || "amazon_us",
+            args?.category as string
+          );
+          break;
+        case "forecast_demand":
+          result = await backend.forecastDemand(
+            args?.productUrl as string,
+            (args?.horizonDays as number) || 7
+          );
+          break;
+        case "subscribe_alert":
+          result = await backend.subscribeAlert(
+            args?.productUrl as string,
+            args?.alertType as string,
+            args?.thresholdPercent as number
+          );
+          break;
+        default:
+          throw new Error(`Unknown tool: ${name}`);
+      }
 
-            case "compare_global_prices":
-                result = await backend.compareGlobalPrices(
-                    args?.url as string,
-                    args?.includeRegions as string[]
-                );
-                break;
-
-            case "detect_trending_products":
-                result = await backend.detectTrending(
-                    args?.category as string,
-                    (args?.platform as string) || "amazon_us",
-                    (args?.limit as number) || 10
-                );
-                break;
-
-            case "analyze_seller":
-                result = await backend.analyzeSeller(
-                    args?.sellerId as string,
-                    (args?.platform as string) || "amazon_us"
-                );
-                break;
-
-            case "analyze_brand":
-                result = await backend.analyzeBrand(
-                    args?.brandName as string,
-                    (args?.platform as string) || "amazon_us",
-                    args?.category as string
-                );
-                break;
-
-            case "forecast_demand":
-                result = await backend.forecastDemand(
-                    args?.productUrl as string,
-                    (args?.horizonDays as number) || 7
-                );
-                break;
-
-            case "subscribe_alert":
-                result = await backend.subscribeAlert(
-                    args?.productUrl as string,
-                    args?.alertType as string,
-                    args?.thresholdPercent as number
-                );
-                break;
-
-            default:
-                throw new Error(`Unknown tool: ${name}`);
-        }
-
-        // Return both text (for backward compat) and structuredContent (for CTX)
-        return {
-            content: [
-                {
-                    type: "text" as const,
-                    text: JSON.stringify(result, null, 2),
-                },
-            ],
-            structuredContent: result, // Required by CTX Protocol
-        };
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result,
+      };
     } catch (error) {
-        const message = error instanceof Error ? error.message : "Unknown error";
-        return {
-            content: [
-                {
-                    type: "text" as const,
-                    text: `Error: ${message}`,
-                },
-            ],
-            isError: true,
-        };
+      const message = error instanceof Error ? error.message : "Unknown error";
+      return {
+        content: [{ type: "text", text: `Error: ${message}` }],
+        isError: true,
+      };
     }
+  });
+
+  return server;
+}
+
+/**
+ * Global Error Handler
+ */
+app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+  console.error("Server error:", err);
+  res.status(500).json({ error: err.message });
 });
 
-// SSE endpoint for MCP transport
-const transports = new Map<string, SSEServerTransport>();
+/**
+ * Start Server
+ */
+async function start() {
+  try {
+    // 1️⃣ Connect MCP to Streamable HTTP transport
+    await mcpServer.connect(streamableTransport);
 
-app.get("/mcp/sse", async (req: Request, res: Response) => {
-    console.log("New SSE connection");
-
-    const transport = new SSEServerTransport("/mcp/messages", res);
-    const sessionId = crypto.randomUUID();
-    transports.set(sessionId, transport);
-
-    res.on("close", () => {
-        transports.delete(sessionId);
-        console.log(`SSE connection closed: ${sessionId}`);
+    // 2️⃣ Mount StreamableHTTP endpoint
+    app.all("/mcp", async (req, res) => {
+      await streamableTransport.handleRequest(req, res);
     });
 
-    await mcpServer.connect(transport);
-});
+    // 3️⃣ SSE endpoint - GET /sse for SSE connections (Inspector compatible)
+    app.get("/sse", async (req: Request, res: Response) => {
+      console.log("New SSE connection request");
 
-app.post("/mcp/messages", async (req: Request, res: Response) => {
-    const sessionId = req.headers["x-session-id"] as string;
-    const transport = transports.get(sessionId);
+      const sessionId = crypto.randomUUID();
+      const sseTransport = new SSEServerTransport("/messages", res);
+      sseTransports.set(sessionId, sseTransport);
 
-    if (transport) {
+      // Create a new MCP server for this SSE session
+      const sseServer = createSSEServer();
+
+      res.on("close", () => {
+        console.log(`SSE session ${sessionId} closed`);
+        sseTransports.delete(sessionId);
+      });
+
+      try {
+        await sseServer.connect(sseTransport);
+        console.log(`SSE session ${sessionId} connected`);
+      } catch (error) {
+        console.error("SSE connection error:", error);
+        sseTransports.delete(sessionId);
+      }
+    });
+
+    // 4️⃣ SSE message endpoint - POST /messages for SSE messages
+    app.post("/messages", async (req: Request, res: Response) => {
+      const sessionId = req.query.sessionId as string;
+      const transport = sseTransports.get(sessionId);
+
+      if (!transport) {
+        res.status(400).json({ error: "Invalid or expired session" });
+        return;
+      }
+
+      try {
         await transport.handlePostMessage(req, res);
-    } else {
-        res.status(400).json({ error: "Invalid session" });
-    }
-});
+      } catch (error) {
+        console.error("SSE message error:", error);
+        res.status(500).json({ error: "Failed to handle message" });
+      }
+    });
 
-// Error handler
-app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-    console.error("Server error:", err);
-    res.status(500).json({ error: err.message });
-});
-
-// Start server
-app.listen(PORT, () => {
-    console.log(`
+    // 5️⃣ Start Express
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`
 ╔═══════════════════════════════════════════════════════════╗
-║           CommerceSignal MCP for CTX Protocol             ║
+║     CommerceSignal MCP (StreamableHTTP + SSE Ready)      ║
 ╠═══════════════════════════════════════════════════════════╣
-║  Server running on port ${PORT}                              ║
-║  MCP endpoint: http://localhost:${PORT}/mcp/sse               ║
-║  Health check: http://localhost:${PORT}/health                ║
-╠═══════════════════════════════════════════════════════════╣
-║  Tools available: ${TOOLS.length}                                       ║
+║  Running on port ${PORT}                                       ║
+║  StreamableHTTP: http://localhost:${PORT}/mcp                  ║
+║  SSE (Inspector): http://localhost:${PORT}/sse                 ║
+║  Health: http://localhost:${PORT}/health                       ║
+║  Tools: ${TOOLS.length}                                              ║
 ╚═══════════════════════════════════════════════════════════╝
-  `);
-});
+      `);
+    });
+  } catch (err) {
+    console.error("Failed to start MCP server:", err);
+    process.exit(1);
+  }
+}
+
+start();
 
 export { app, mcpServer };
