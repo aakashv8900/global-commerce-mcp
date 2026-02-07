@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     scrape_delay_min: int = 2
     scrape_delay_max: int = 5
+    
+    # Proxy Services (optional)
+    scraper_api_key: str | None = None
+    bright_data_user: str | None = None
+    bright_data_pass: str | None = None
 
     # MCP
     mcp_server_name: str = "commerce-signal"
