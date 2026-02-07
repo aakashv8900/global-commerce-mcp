@@ -127,3 +127,23 @@ class ProductRepository:
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def get_all_by_platform(
+        self, platform: str, limit: int = 1000
+    ) -> list[Product]:
+        """Get all products for a platform."""
+        stmt = (
+            select(Product)
+            .where(Product.platform == platform)
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def count_by_platform(self, platform: str) -> int:
+        """Count products by platform."""
+        from sqlalchemy import func
+        stmt = select(func.count(Product.id)).where(Product.platform == platform)
+        result = await self.session.execute(stmt)
+        return result.scalar() or 0
+

@@ -77,20 +77,78 @@ async def health_check():
 
 @app.post("/api/analyze-product")
 async def analyze_product(request: AnalyzeProductRequest):
-    """Analyze a product and return intelligence."""
+    """Analyze a product - scrapes in real-time if not in database."""
+    from src.scrapers import AmazonScraper, FlipkartScraper, EbayScraper, WalmartScraper
+    from datetime import date
+    
     product_id, platform = extract_product_id(request.url)
     
     if not product_id:
-        raise HTTPException(status_code=400, detail="Invalid product URL")
+        raise HTTPException(status_code=400, detail="Invalid product URL. Supported: Amazon, Flipkart, eBay, Walmart")
     
     async with async_session_maker() as session:
         product_repo = ProductRepository(session)
         metrics_repo = MetricsRepository(session)
         
-        # Get product
+        # Try to get existing product
         product = await product_repo.get_by_asin(product_id, platform)
+        
+        # If not found, scrape in real-time
         if not product:
-            raise HTTPException(status_code=404, detail="Product not found")
+            scraped_data = None
+            
+            try:
+                # Auto-detect scraper based on platform
+                if platform == "amazon_us":
+                    async with AmazonScraper() as scraper:
+                        scraped_data = await scraper.scrape_with_retry(request.url)
+                elif platform == "flipkart_in":
+                    async with FlipkartScraper() as scraper:
+                        scraped_data = await scraper.scrape_with_retry(request.url)
+                elif platform == "ebay":
+                    async with EbayScraper() as scraper:
+                        scraped_data = await scraper.scrape_with_retry(request.url)
+                elif platform == "walmart":
+                    async with WalmartScraper() as scraper:
+                        scraped_data = await scraper.scrape_with_retry(request.url)
+                
+                if scraped_data:
+                    # Add to database
+                    product = await product_repo.create(
+                        platform=platform,
+                        asin=scraped_data.asin,
+                        url=request.url,
+                        title=scraped_data.title,
+                        category=scraped_data.category,
+                        brand=scraped_data.brand,
+                        image_url=scraped_data.image_url,
+                    )
+                    await session.commit()
+                    
+                    # Add initial metrics
+                    await metrics_repo.create(
+                        product_id=product.id,
+                        metric_date=date.today(),
+                        price=scraped_data.price,
+                        original_price=scraped_data.original_price,
+                        discount_percent=scraped_data.discount_percent,
+                        rank=scraped_data.rank,
+                        reviews=scraped_data.reviews,
+                        rating=scraped_data.rating,
+                        seller_count=scraped_data.seller_count,
+                        in_stock=scraped_data.in_stock,
+                        delivery_days=scraped_data.delivery_days,
+                        buybox_owner=scraped_data.buybox_owner,
+                    )
+                    await session.commit()
+            except Exception as e:
+                print(f"Real-time scrape failed for {request.url}: {e}")
+        
+        if not product:
+            raise HTTPException(
+                status_code=404, 
+                detail="Product not found and real-time scraping failed. Try again later."
+            )
         
         # Get metrics
         metrics = await metrics_repo.get_last_n_days(product.id, 30)
@@ -99,8 +157,7 @@ async def analyze_product(request: AnalyzeProductRequest):
         engine = IntelligenceEngine()
         formatter = IntelligenceFormatter()
         
-        intelligence = engine.analyze(product, metrics)
-        formatted = formatter.format(intelligence)
+        intelligence = engine.analyze_product(product, metrics)
         
         return {
             "product": {
@@ -113,8 +170,17 @@ async def analyze_product(request: AnalyzeProductRequest):
                 "brand": product.brand,
                 "imageUrl": product.image_url,
             },
-            "intelligence": formatted,
-            "insights": intelligence.get("insights", []),
+            "intelligence": {
+                "overallScore": intelligence.overall_score,
+                "verdict": intelligence.verdict,
+                "confidence": intelligence.confidence,
+                "demand": {"score": intelligence.demand.score, "interpretation": intelligence.demand.interpretation},
+                "competition": {"score": intelligence.competition.score, "barrier": intelligence.competition.barrier_to_entry},
+                "trend": {"score": intelligence.trend.score, "direction": intelligence.trend.trend_direction},
+                "risk": {"score": intelligence.risk.score, "level": intelligence.risk.risk_level},
+            },
+            "insights": intelligence.insights,
+            "scraped_realtime": product is not None,
         }
 
 
