@@ -1,0 +1,122 @@
+name: Deploy to AWS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY_PYTHON: commerce-signal/python-api
+  ECR_REPOSITORY_CTX: commerce-signal/ctx-wrapper
+  ECS_CLUSTER: commerce-signal-production
+  ECS_SERVICE: commerce-signal
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+      
+      - name: Run tests
+        run: pytest tests/ -v
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Test CTX wrapper
+        run: |
+          cd ctx-wrapper
+          npm ci
+          npm run build
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      python-image: ${{ steps.build-python.outputs.image }}
+      ctx-image: ${{ steps.build-ctx.outputs.image }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Build and push Python API
+        id: build-python
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -f Dockerfile.python -t $ECR_REGISTRY/$ECR_REPOSITORY_PYTHON:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_PYTHON:$IMAGE_TAG
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY_PYTHON:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY_PYTHON:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_PYTHON:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY_PYTHON:$IMAGE_TAG" >> $GITHUB_OUTPUT
+      
+      - name: Build and push CTX wrapper
+        id: build-ctx
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          cd ctx-wrapper
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_CTX:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_CTX:$IMAGE_TAG
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY_CTX:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY_CTX:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_CTX:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY_CTX:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Update ECS service
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --force-new-deployment
+      
+      - name: Wait for deployment
+        run: |
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }}
+      
+      - name: Output deployment info
+        run: |
+          echo "✅ Deployment complete!"
+          echo "Python image: ${{ needs.build-and-push.outputs.python-image }}"
+          echo "CTX image: ${{ needs.build-and-push.outputs.ctx-image }}"

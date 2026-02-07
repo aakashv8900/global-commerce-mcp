@@ -1,0 +1,267 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CommerceSignal MCP - AWS Free Tier (Everything on EC2)'
+
+# ═══════════════════════════════════════════════════════════════════════
+#  100% FREE TIER - EVERYTHING ON ONE EC2:
+#  - EC2 t2.micro (750 hrs/month free for 12 months)
+#  - PostgreSQL in Docker with EBS volume (persistent!)
+#  - Redis in Docker
+#  - 30GB EBS storage (free)
+#  - Elastic IP (free when attached)
+#  - NO RDS, NO ElastiCache, NO ALB = $0/month!
+# ═══════════════════════════════════════════════════════════════════════
+
+Parameters:
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access
+  
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Description: PostgreSQL password
+    MinLength: 8
+    Default: commerce123
+
+Resources:
+  # VPC (Free)
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: commerce-signal-free
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # Security Group
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EC2 Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: 0.0.0.0/0
+
+  # EC2 Instance - FREE TIER (t2.micro) - UBUNTU - ALL SERVICES
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro  # FREE TIER!
+      ImageId: !Sub '{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}'
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 30  # Free up to 30GB - stores DB data!
+            VolumeType: gp2
+            DeleteOnTermination: false  # KEEP DATA if instance terminated
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -ex
+          
+          # Update system
+          apt-get update && apt-get upgrade -y
+          
+          # Install Docker
+          apt-get install -y docker.io docker-compose git curl
+          systemctl start docker
+          systemctl enable docker
+          usermod -aG docker ubuntu
+          
+          # Create app directory with persistent data folder
+          mkdir -p /home/ubuntu/commerce-signal
+          mkdir -p /home/ubuntu/commerce-signal/postgres_data
+          mkdir -p /home/ubuntu/commerce-signal/redis_data
+          cd /home/ubuntu/commerce-signal
+          
+          # Create docker-compose - ALL SERVICES IN DOCKER
+          cat > docker-compose.yml << 'EOF'
+          version: '3.8'
+          services:
+            # PostgreSQL - PERSISTENT with volume
+            postgres:
+              image: postgres:16-alpine
+              restart: always
+              environment:
+                POSTGRES_USER: postgres
+                POSTGRES_PASSWORD: ${DBPassword}
+                POSTGRES_DB: commerce_signal
+              volumes:
+                - ./postgres_data:/var/lib/postgresql/data
+              healthcheck:
+                test: ["CMD-SHELL", "pg_isready -U postgres"]
+                interval: 5s
+                timeout: 5s
+                retries: 5
+            
+            # Redis
+            redis:
+              image: redis:7-alpine
+              restart: always
+              volumes:
+                - ./redis_data:/data
+            
+            # Python API
+            python-api:
+              image: ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/commerce-signal/python-api:latest
+              restart: always
+              ports:
+                - "8000:8000"
+              environment:
+                - DATABASE_URL=postgresql+asyncpg://postgres:${DBPassword}@postgres:5432/commerce_signal
+                - REDIS_URL=redis://redis:6379
+              depends_on:
+                postgres:
+                  condition: service_healthy
+                redis:
+                  condition: service_started
+            
+            # CTX Wrapper
+            ctx-wrapper:
+              image: ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/commerce-signal/ctx-wrapper:latest
+              restart: always
+              ports:
+                - "3000:3000"
+                - "80:3000"
+              environment:
+                - PYTHON_BACKEND_URL=http://python-api:8000
+                - CTX_ENABLED=true
+                - PORT=3000
+              depends_on:
+                - python-api
+          EOF
+          
+          chown -R ubuntu:ubuntu /home/ubuntu/commerce-signal
+          
+          # Install AWS CLI
+          apt-get install -y unzip
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          ./aws/install
+          
+          # Login to ECR and pull images
+          aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+          
+          # Start services
+          cd /home/ubuntu/commerce-signal
+          docker-compose pull
+          docker-compose up -d
+          
+          echo "Deployment complete!" > /home/ubuntu/deployment-status.txt
+      Tags:
+        - Key: Name
+          Value: commerce-signal-free
+
+  # EC2 IAM Role for ECR access
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+
+  # Elastic IP - FREE when attached to running instance
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref EC2Instance
+
+  # ECR Repositories (Free up to 500MB/month)
+  PythonAPIRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: commerce-signal/python-api
+
+  CTXWrapperRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: commerce-signal/ctx-wrapper
+
+Outputs:
+  PublicIP:
+    Description: Your MCP endpoint IP
+    Value: !Ref ElasticIP
+    Export:
+      Name: CommerceSignalIP
+
+  MCPEndpoint:
+    Description: MCP endpoint URL
+    Value: !Sub 'http://${ElasticIP}:3000/mcp'
+
+  HealthEndpoint:
+    Description: Health check URL
+    Value: !Sub 'http://${ElasticIP}:3000/health'
+
+  SSHCommand:
+    Description: SSH into EC2
+    Value: !Sub 'ssh -i ${KeyPairName}.pem ubuntu@${ElasticIP}'
