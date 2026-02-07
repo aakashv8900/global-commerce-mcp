@@ -3,7 +3,7 @@ Description: 'CommerceSignal MCP - AWS Free Tier (Everything on EC2)'
 
 # ═══════════════════════════════════════════════════════════════════════
 #  100% FREE TIER - EVERYTHING ON ONE EC2:
-#  - EC2 t2.micro (750 hrs/month free for 12 months)
+#  - EC2 t3.micro (750 hrs/month free for 12 months)
 #  - PostgreSQL in Docker with EBS volume (persistent!)
 #  - Redis in Docker
 #  - 30GB EBS storage (free)
@@ -95,11 +95,11 @@ Resources:
           ToPort: 3000
           CidrIp: 0.0.0.0/0
 
-  # EC2 Instance - FREE TIER (t2.micro) - UBUNTU - ALL SERVICES
+  # EC2 Instance - FREE TIER (t3.micro) - UBUNTU - ALL SERVICES
   EC2Instance:
     Type: AWS::EC2::Instance
     Properties:
-      InstanceType: t2.micro  # FREE TIER!
+      InstanceType: t3.micro  # FREE TIER!
       ImageId: !Sub '{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}'
       KeyName: !Ref KeyPairName
       SubnetId: !Ref PublicSubnet
@@ -236,16 +236,8 @@ Resources:
     Properties:
       InstanceId: !Ref EC2Instance
 
-  # ECR Repositories (Free up to 500MB/month)
-  PythonAPIRepository:
-    Type: AWS::ECR::Repository
-    Properties:
-      RepositoryName: commerce-signal/python-api
-
-  CTXWrapperRepository:
-    Type: AWS::ECR::Repository
-    Properties:
-      RepositoryName: commerce-signal/ctx-wrapper
+  # NOTE: ECR repositories are created by deploy.sh, not here
+  # This avoids conflicts if they already exist
 
 Outputs:
   PublicIP:

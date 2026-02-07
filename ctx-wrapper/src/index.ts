@@ -11,10 +11,18 @@ import {
     ListToolsRequestSchema,
     CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { createContextMiddleware } from "@ctxprotocol/sdk";
 
-import { TOOLS, getToolByName } from "./tools/index.js";
+import { TOOLS } from "./tools/index.js";
 import { getBackendClient } from "./backend/client.js";
+
+// Dynamic import for CTX SDK (handles if not available)
+let createContextMiddleware: any = null;
+try {
+    const ctxSdk = await import("@ctxprotocol/sdk");
+    createContextMiddleware = ctxSdk.createContextMiddleware;
+} catch (e) {
+    console.log("CTX SDK not available, running without payment verification");
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -22,15 +30,25 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 
 // CTX Protocol middleware - handles payment verification & request signing
-// This is required for paid tools on the CTX marketplace
-if (process.env.CTX_ENABLED === "true") {
+if (process.env.CTX_ENABLED === "true" && createContextMiddleware) {
     app.use("/mcp", createContextMiddleware());
     console.log("✓ CTX Protocol middleware enabled");
+} else {
+    console.log("ℹ CTX middleware disabled (set CTX_ENABLED=true to enable)");
 }
 
 // Health check endpoint
 app.get("/health", (_req: Request, res: Response) => {
     res.json({ status: "ok", service: "commerce-signal-mcp", version: "1.0.0" });
+});
+
+// Simple test endpoint - lists all tools (no SSE required)
+app.get("/test/tools", (_req: Request, res: Response) => {
+    res.json({
+        success: true,
+        toolCount: TOOLS.length,
+        tools: TOOLS.map(t => ({ name: t.name, description: t.description }))
+    });
 });
 
 // Create MCP server instance
@@ -119,7 +137,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         return {
             content: [
                 {
-                    type: "text",
+                    type: "text" as const,
                     text: JSON.stringify(result, null, 2),
                 },
             ],
@@ -130,7 +148,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         return {
             content: [
                 {
-                    type: "text",
+                    type: "text" as const,
                     text: `Error: ${message}`,
                 },
             ],
@@ -158,12 +176,10 @@ app.get("/mcp/sse", async (req: Request, res: Response) => {
 });
 
 app.post("/mcp/messages", async (req: Request, res: Response) => {
-    // Handle incoming messages from MCP client
     const sessionId = req.headers["x-session-id"] as string;
     const transport = transports.get(sessionId);
 
     if (transport) {
-        // Forward message to transport
         await transport.handlePostMessage(req, res);
     } else {
         res.status(400).json({ error: "Invalid session" });
@@ -187,7 +203,6 @@ app.listen(PORT, () => {
 ║  Health check: http://localhost:${PORT}/health                ║
 ╠═══════════════════════════════════════════════════════════╣
 ║  Tools available: ${TOOLS.length}                                       ║
-║  CTX Protocol: ${process.env.CTX_ENABLED === "true" ? "Enabled ✓" : "Disabled (set CTX_ENABLED=true)"}     ║
 ╚═══════════════════════════════════════════════════════════╝
   `);
 });
