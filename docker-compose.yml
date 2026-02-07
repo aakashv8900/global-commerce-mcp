@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  # Python backend (FastAPI)
+  python-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    container_name: commerce-signal-api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:password@postgres:5432/commerce_signal
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # CTX Protocol wrapper (TypeScript)
+  ctx-wrapper:
+    build:
+      context: ./ctx-wrapper
+      dockerfile: Dockerfile
+    container_name: commerce-signal-ctx
+    ports:
+      - "3000:3000"
+    environment:
+      - PYTHON_BACKEND_URL=http://python-backend:8000
+      - CTX_ENABLED=true
+      - PORT=3000
+    depends_on:
+      python-backend:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: commerce-signal-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: commerce_signal
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: commerce-signal-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:
+
