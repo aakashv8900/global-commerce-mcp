@@ -33,6 +33,27 @@ class ScrapedProduct:
     brand: str | None
     delivery_days: int | None
     buybox_owner: str | None
+    
+    # Optional fields for platform compatibility
+    platform: str = "unknown"
+    product_id: str = ""
+    url: str = ""
+
+
+@dataclass
+class ScrapedMetrics:
+    """Daily metrics scraped from a product page."""
+    
+    price: Decimal
+    original_price: Decimal | None
+    discount_percent: float | None
+    rank: int | None
+    reviews: int
+    rating: float
+    seller_count: int
+    in_stock: bool
+    delivery_days: int | None
+    buybox_owner: str | None
 
 
 class BaseScraper(ABC):
