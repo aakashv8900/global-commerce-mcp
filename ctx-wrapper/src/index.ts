@@ -306,9 +306,12 @@ async function start() {
       if (isSSERequest) {
         // SSE transport for MCP Inspector
         console.log("SSE connection on /mcp (Inspector mode)");
-        const sessionId = crypto.randomUUID();
         const sseTransport = new SSEServerTransport("/messages", res);
+
+        // Use the transport's internal sessionId
+        const sessionId = sseTransport.sessionId;
         sseTransports.set(sessionId, sseTransport);
+        console.log(`SSE session created: ${sessionId}`);
 
         const sseServer = createSSEServer();
 
@@ -332,11 +335,13 @@ async function start() {
 
     // 3️⃣ SSE endpoint - GET /sse for SSE connections (Inspector compatible)
     app.get("/sse", async (req: Request, res: Response) => {
-      console.log("New SSE connection request");
-
-      const sessionId = crypto.randomUUID();
+      console.log("New SSE connection request on /sse");
       const sseTransport = new SSEServerTransport("/messages", res);
+
+      // Use the transport's internal sessionId
+      const sessionId = sseTransport.sessionId;
       sseTransports.set(sessionId, sseTransport);
+      console.log(`SSE session created: ${sessionId}`);
 
       // Create a new MCP server for this SSE session
       const sseServer = createSSEServer();
