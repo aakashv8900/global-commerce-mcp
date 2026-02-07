@@ -153,6 +153,7 @@ class BaseScraper(ABC):
             has_touch=False,
             is_mobile=False,
             color_scheme="light",
+            ignore_https_errors=True,  # Fix SSL errors with proxy
         )
         
         # Block unnecessary resources for speed
