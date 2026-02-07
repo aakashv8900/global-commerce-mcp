@@ -202,48 +202,38 @@ class BaseScraper(ABC):
             await asyncio.sleep(random.uniform(0.3, 0.8))
 
     async def scrape_with_retry(self, url: str) -> ScrapedProduct | None:
-        """Scrape with retry logic and circuit breaker."""
+        """Scrape with retry logic and circuit breaker (FREE mode)."""
         # Check circuit breaker
         if circuit_breaker.is_open(self.PLATFORM):
-            print(f"Circuit breaker open for {self.PLATFORM}, skipping")
+            print(f"Circuit breaker open for {self.PLATFORM}, waiting...")
             return None
         
-        # Rate limiting
+        # Rate limiting (slower for free mode)
         await rate_limiter.acquire()
+        
+        # Add human-like delay before scraping
+        await asyncio.sleep(random.uniform(2, 5))
         
         for attempt in range(self.MAX_RETRIES):
             try:
-                # Try ScraperAPI direct mode first (more reliable)
-                if proxy_manager.has_scraper_api():
-                    html = await proxy_manager.fetch_with_scraper_api(url)
-                    if html:
-                        result = await self.parse_product_html(url, html)
-                        if result:
-                            circuit_breaker.record_success(self.PLATFORM)
-                            return result
-                
-                # Fallback to Playwright
                 result = await self.scrape_product(url)
                 if result:
                     circuit_breaker.record_success(self.PLATFORM)
                     return result
                 else:
                     # Null result might mean blocked
+                    print(f"Blocked on {url}")
                     circuit_breaker.record_failure(self.PLATFORM)
             except Exception as e:
                 print(f"Attempt {attempt + 1} failed for {url}: {e}")
                 circuit_breaker.record_failure(self.PLATFORM)
                 
                 if attempt < self.MAX_RETRIES - 1:
-                    # Exponential backoff
-                    wait_time = (2 ** attempt) + random.uniform(0, 1)
+                    # Longer exponential backoff for free mode
+                    wait_time = (3 ** attempt) + random.uniform(1, 3)
+                    print(f"Waiting {wait_time:.1f}s before retry...")
                     await asyncio.sleep(wait_time)
         
-        return None
-
-    async def parse_product_html(self, url: str, html: str) -> ScrapedProduct | None:
-        """Parse product from raw HTML. Override in subclasses for direct API mode."""
-        # Default implementation - subclasses should override for efficiency
         return None
 
     @abstractmethod

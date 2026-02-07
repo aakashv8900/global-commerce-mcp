@@ -1,13 +1,10 @@
-"""Proxy manager with ScraperAPI direct rendering support."""
+"""Free proxy manager with enhanced stealth - no paid services required."""
 
 import random
 import asyncio
-import aiohttp
 from dataclasses import dataclass
 from typing import Optional
 from datetime import datetime, timedelta
-
-from src.config import settings
 
 
 @dataclass
@@ -26,116 +23,39 @@ class ProxyConfig:
         return f"{self.protocol}://{self.host}:{self.port}"
 
 
-class ScraperAPIClient:
-    """Client for ScraperAPI direct rendering (more reliable than proxy mode)."""
-    
-    BASE_URL = "https://api.scraperapi.com"
-    
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-    
-    async def fetch_html(self, url: str, render_js: bool = True) -> Optional[str]:
-        """Fetch page HTML using ScraperAPI."""
-        params = {
-            "api_key": self.api_key,
-            "url": url,
-            "render": str(render_js).lower(),
-            "country_code": "us",
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    self.BASE_URL,
-                    params=params,
-                    timeout=aiohttp.ClientTimeout(total=60)
-                ) as response:
-                    if response.status == 200:
-                        return await response.text()
-                    else:
-                        print(f"ScraperAPI error {response.status}: {await response.text()}")
-                        return None
-        except Exception as e:
-            print(f"ScraperAPI request failed: {e}")
-            return None
-
-
 class ProxyManager:
-    """Manages proxy rotation for scrapers."""
+    """Free proxy manager - uses direct connection with enhanced stealth."""
     
     def __init__(self):
-        self.proxies: list[ProxyConfig] = []
         self.failed_proxies: dict[str, datetime] = {}
-        self.current_index = 0
-        self.scraper_api_client: Optional[ScraperAPIClient] = None
-        self._load_proxies()
-    
-    def _load_proxies(self):
-        """Load proxies from config or environment."""
-        # Check for ScraperAPI key - use direct API mode
-        scraper_api_key = getattr(settings, 'scraper_api_key', None)
-        if scraper_api_key:
-            self.scraper_api_client = ScraperAPIClient(scraper_api_key)
-            print(f"ScraperAPI configured in direct mode")
-        
-        # Check for Bright Data credentials
-        bright_data_user = getattr(settings, 'bright_data_user', None)
-        bright_data_pass = getattr(settings, 'bright_data_pass', None)
-        if bright_data_user and bright_data_pass:
-            self.proxies.append(ProxyConfig(
-                host="brd.superproxy.io",
-                port=22225,
-                username=bright_data_user,
-                password=bright_data_pass,
-            ))
+        self.scraper_api_client = None  # No paid services
+        print("Running in FREE mode - enhanced stealth without paid proxies")
     
     def has_scraper_api(self) -> bool:
-        """Check if ScraperAPI is configured."""
-        return self.scraper_api_client is not None
+        """Always False for free mode."""
+        return False
     
     async def fetch_with_scraper_api(self, url: str) -> Optional[str]:
-        """Fetch page using ScraperAPI direct rendering."""
-        if self.scraper_api_client:
-            return await self.scraper_api_client.fetch_html(url)
+        """Not available in free mode."""
         return None
     
     def get_proxy(self) -> Optional[ProxyConfig]:
-        """Get next available proxy with rotation."""
-        if not self.proxies:
-            return None
-        
-        # Clean expired failures (retry after 5 minutes)
-        now = datetime.now()
-        self.failed_proxies = {
-            k: v for k, v in self.failed_proxies.items()
-            if now - v < timedelta(minutes=5)
-        }
-        
-        # Find available proxy
-        for _ in range(len(self.proxies)):
-            proxy = self.proxies[self.current_index]
-            self.current_index = (self.current_index + 1) % len(self.proxies)
-            
-            if proxy.url not in self.failed_proxies:
-                return proxy
-        
-        # All proxies failed, return first one anyway
-        return self.proxies[0] if self.proxies else None
+        """No proxy in free mode - rely on stealth."""
+        return None
     
     def mark_failed(self, proxy: ProxyConfig):
         """Mark a proxy as failed."""
-        self.failed_proxies[proxy.url] = datetime.now()
+        pass
     
     def mark_success(self, proxy: ProxyConfig):
         """Mark a proxy as successful."""
-        if proxy.url in self.failed_proxies:
-            del self.failed_proxies[proxy.url]
+        pass
 
 
 class RateLimiter:
-    """Rate limiter for scrapers."""
+    """Rate limiter for scrapers - slower for free mode to avoid blocks."""
     
-    def __init__(self, requests_per_minute: int = 10):
+    def __init__(self, requests_per_minute: int = 5):  # Slower for free mode
         self.requests_per_minute = requests_per_minute
         self.request_times: list[datetime] = []
     
@@ -151,7 +71,7 @@ class RateLimiter:
             # Wait until oldest request expires
             wait_time = (self.request_times[0] - minute_ago).total_seconds()
             if wait_time > 0:
-                await asyncio.sleep(wait_time + 0.1)
+                await asyncio.sleep(wait_time + 0.5)
         
         self.request_times.append(now)
 
@@ -159,9 +79,9 @@ class RateLimiter:
 class CircuitBreaker:
     """Circuit breaker for failing scrapers."""
     
-    def __init__(self, failure_threshold: int = 5, reset_timeout: int = 60):
+    def __init__(self, failure_threshold: int = 3, reset_timeout: int = 300):
         self.failure_threshold = failure_threshold
-        self.reset_timeout = reset_timeout
+        self.reset_timeout = reset_timeout  # 5 minutes for free mode
         self.failures: dict[str, int] = {}
         self.open_circuits: dict[str, datetime] = {}
     
@@ -181,6 +101,7 @@ class CircuitBreaker:
         self.failures[platform] = self.failures.get(platform, 0) + 1
         if self.failures[platform] >= self.failure_threshold:
             self.open_circuits[platform] = datetime.now()
+            print(f"Circuit breaker OPEN for {platform} - waiting {self.reset_timeout}s")
     
     def record_success(self, platform: str):
         """Record a success for a platform."""
@@ -189,7 +110,7 @@ class CircuitBreaker:
             del self.open_circuits[platform]
 
 
-# Global instances
+# Global instances - configured for free mode
 proxy_manager = ProxyManager()
-rate_limiter = RateLimiter(requests_per_minute=30)
-circuit_breaker = CircuitBreaker(failure_threshold=10, reset_timeout=300)
+rate_limiter = RateLimiter(requests_per_minute=5)  # Slower for free
+circuit_breaker = CircuitBreaker(failure_threshold=3, reset_timeout=300)
